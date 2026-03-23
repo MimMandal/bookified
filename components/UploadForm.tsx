@@ -1,272 +1,249 @@
-'use client'
 
-import React, { useState } from 'react'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { Upload, X, ImageIcon } from 'lucide-react'
-import { UploadSchema } from '@/lib/zod'
-import { BookUploadFormValues } from '@/types'
-import LoadingOverlay from './LoadingOverlay'
+'use client';
 
-const MALE_VOICES = [
-  { id: 'Dave', name: 'Dave', description: 'Young male, British-Essex, casual & conversational' },
-  { id: 'Daniel', name: 'Daniel', description: 'Middle-aged male, British, authoritative but warm' },
-  { id: 'Chris', name: 'Chris', description: 'Male casual & easy-going' },
-]
-
-const FEMALE_VOICES = [
-  { id: 'Rachel', name: 'Rachel', description: 'Young female, American, calm & clear' },
-  { id: 'Sarah', name: 'Sarah', description: 'Young female, American, soft & approachable' },
-]
+import React, { useState, useEffect } from 'react';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { Upload, ImageIcon } from 'lucide-react';
+import { UploadSchema } from '@/lib/zod';
+import { BookUploadFormValues } from '@/types';
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { ACCEPTED_PDF_TYPES, ACCEPTED_IMAGE_TYPES, DEFAULT_VOICE } from '@/lib/constants';
+import FileUploader from './FileUploader';
+import VoiceSelector from './VoiceSelector';
+import LoadingOverlay from './LoadingOverlay';
+import {useAuth, useUser} from "@clerk/nextjs";
+import { toast } from 'sonner';
+import {checkBookExists, createBook, saveBookSegments} from "@/lib/actions/book.actions";
+import {useRouter} from "next/navigation";
+import {parsePDFFile} from "@/lib/utils";
+import {upload} from "@vercel/blob/client";
 
 const UploadForm = () => {
-  const [pdfFileName, setPdfFileName] = useState<string | null>(null)
-  const [coverFileName, setCoverFileName] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isMounted, setIsMounted] = useState(false);
+    const { userId } = useAuth();
+    const router = useRouter()
 
-  const form = useForm<BookUploadFormValues>({
-    resolver: zodResolver(UploadSchema),
-    defaultValues: {
-      title: '',
-      author: '',
-      voice: 'Rachel',
-    },
-  })
+    useEffect(() => {
+        setIsMounted(true);
+    }, []);
 
-  const onPdfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      setPdfFileName(file.name)
-      form.setValue('pdf', file)
-    }
-  }
+    const form = useForm<BookUploadFormValues>({
+        resolver: zodResolver(UploadSchema),
+        defaultValues: {
+            title: '',
+            author: '',
+            persona: '',
+            pdfFile: undefined,
+            coverImage: undefined,
+        },
+    });
 
-  const onCoverChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      setCoverFileName(file.name)
-      form.setValue('coverImage', file)
-    }
-  }
+    const onSubmit = async (data: BookUploadFormValues) => {
+        if(!userId) {
+           return toast.error("Please login to upload books");
+        }
 
-  const removePdf = () => {
-    setPdfFileName(null)
-    form.setValue('pdf', undefined as any)
-  }
+        setIsSubmitting(true);
 
-  const removeCover = () => {
-    setCoverFileName(null)
-    form.setValue('coverImage', null)
-  }
+        // PostHog -> Track Book Uploads...
 
-  const onSubmit = async (values: BookUploadFormValues) => {
-    setIsLoading(true)
-    try {
-      // Handle form submission
-      console.log('Form submitted:', values)
-      // Add your API call here
-    } catch (error) {
-      console.error('Error submitting form:', error)
-    } finally {
-      setIsLoading(false)
-    }
-  }
+        try {
+            const existsCheck = await checkBookExists(data.title);
 
-  return (
-    <>
-      <LoadingOverlay isVisible={isLoading} message="Preparing your book..." />
-      <div className="new-book-wrapper">
-        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
-          {/* PDF Upload */}
-          <div>
-            <label className="form-label">Book PDF File</label>
-            <div
-              className={`upload-dropzone border-2 border-dashed ${
-                pdfFileName ? 'upload-dropzone-uploaded' : 'border-[#ddd]'
-              }`}
-              onClick={() => document.getElementById('pdf-input')?.click()}
-            >
-              {pdfFileName ? (
-                <div className="flex items-center justify-between w-full px-4">
-                  <span className="upload-dropzone-text">{pdfFileName}</span>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      removePdf()
-                    }}
-                    className="upload-dropzone-remove"
-                  >
-                    <X size={20} />
-                  </button>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center">
-                  <Upload className="upload-dropzone-icon" />
-                  <p className="upload-dropzone-text">Click to upload PDF</p>
-                  <p className="upload-dropzone-hint">PDF file (max 50MB)</p>
-                </div>
-              )}
+            if(existsCheck.exists && existsCheck.book) {
+                toast.info("Book with same title already exists.");
+                form.reset()
+                router.push(`/books/${existsCheck.book.slug}`)
+                return;
+            }
+
+            const fileTitle = data.title.replace(/\s+/g, '-').toLowerCase();
+            const pdfFile = data.pdfFile;
+
+            const parsedPDF = await parsePDFFile(pdfFile);
+
+            if(parsedPDF.content.length === 0) {
+                toast.error("Failed to parse PDF. Please try again with a different file.");
+                return;
+            }
+
+            const uploadedPdfBlob = await upload(fileTitle, pdfFile, {
+                access: 'public',
+                handleUploadUrl: '/api/upload',
+                contentType: 'application/pdf'
+            });
+
+            let coverUrl: string;
+
+            if(data.coverImage) {
+                const coverFile = data.coverImage;
+                const uploadedCoverBlob = await upload(`${fileTitle}_cover.png`, coverFile, {
+                    access: 'public',
+                    handleUploadUrl: '/api/upload',
+                    contentType: coverFile.type
+                });
+                coverUrl = uploadedCoverBlob.url;
+            } else {
+                const response = await fetch(parsedPDF.cover)
+                const blob = await response.blob();
+
+                const uploadedCoverBlob = await upload(`${fileTitle}_cover.png`, blob, {
+                    access: 'public',
+                    handleUploadUrl: '/api/upload',
+                    contentType: 'image/png'
+                });
+                coverUrl = uploadedCoverBlob.url;
+            }
+
+            const book = await createBook({
+                clerkId: userId,
+                title: data.title,
+                author: data.author,
+                persona: data.persona,
+                fileURL: uploadedPdfBlob.url,
+                fileBlobKey: uploadedPdfBlob.pathname,
+                coverURL: coverUrl,
+                fileSize: pdfFile.size,
+            });
+
+            if(!book.success) {
+                toast.error(book.error as string || "Failed to create book");
+                if (book.isBillingError) {
+                    router.push("/subscriptions");
+                }
+                return;
+            }
+
+            if(book.alreadyExists) {
+                toast.info("Book with same title already exists.");
+                form.reset()
+                router.push(`/books/${book.data.slug}`)
+                return;
+            }
+
+            const segments = await saveBookSegments(book.data._id, userId, parsedPDF.content);
+
+            if(!segments.success) {
+                toast.error("Failed to save book segments");
+                throw new Error("Failed to save book segments");
+            }
+
+            form.reset();
+            router.push('/');
+        } catch (error) {
+            console.error(error);
+
+            toast.error("Failed to upload book. Please try again later.");
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    if (!isMounted) return null;
+
+    return (
+        <>
+            {isSubmitting && <LoadingOverlay />}
+
+            <div className="new-book-wrapper">
+                <Form {...form}>
+                    <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
+                        {/* 1. PDF File Upload */}
+                        <FileUploader
+                            control={form.control}
+                            name="pdfFile"
+                            label="Book PDF File"
+                            acceptTypes={ACCEPTED_PDF_TYPES}
+                            icon={Upload}
+                            placeholder="Click to upload PDF"
+                            hint="PDF file (max 50MB)"
+                            disabled={isSubmitting}
+                        />
+
+                        {/* 2. Cover Image Upload */}
+                        <FileUploader
+                            control={form.control}
+                            name="coverImage"
+                            label="Cover Image (Optional)"
+                            acceptTypes={ACCEPTED_IMAGE_TYPES}
+                            icon={ImageIcon}
+                            placeholder="Click to upload cover image"
+                            hint="Leave empty to auto-generate from PDF"
+                            disabled={isSubmitting}
+                        />
+
+                        {/* 3. Title Input */}
+                        <FormField
+                            control={form.control}
+                            name="title"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel className="form-label">Title</FormLabel>
+                                    <FormControl>
+                                        <Input
+                                            className="form-input"
+                                            placeholder="ex: Rich Dad Poor Dad"
+                                            {...field}
+                                            disabled={isSubmitting}
+                                        />
+                                    </FormControl>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+
+                        {/* 4. Author Input */}
+                        <FormField
+                            control={form.control}
+                            name="author"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel className="form-label">Author Name</FormLabel>
+                                    <FormControl>
+                                        <Input
+                                            className="form-input"
+                                            placeholder="ex: Robert Kiyosaki"
+                                            {...field}
+                                            disabled={isSubmitting}
+                                        />
+                                    </FormControl>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+
+                        {/* 5. Voice Selector */}
+                        <FormField
+                            control={form.control}
+                            name="persona"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel className="form-label">Choose Assistant Voice</FormLabel>
+                                    <FormControl>
+                                        <VoiceSelector
+                                            value={field.value}
+                                            onChange={field.onChange}
+                                            disabled={isSubmitting}
+                                        />
+                                    </FormControl>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+
+                        {/* 6. Submit Button */}
+                        <Button type="submit" className="form-btn" disabled={isSubmitting}>
+                            Begin Synthesis
+                        </Button>
+                    </form>
+                </Form>
             </div>
-            <input
-              id="pdf-input"
-              type="file"
-              accept=".pdf"
-              onChange={onPdfChange}
-              className="hidden"
-            />
-            {form.formState.errors.pdf && (
-              <p className="text-red-500 text-sm mt-1">{form.formState.errors.pdf.message}</p>
-            )}
-          </div>
+        </>
+    );
+};
 
-          {/* Cover Image Upload */}
-          <div>
-            <label className="form-label">Cover Image (Optional)</label>
-            <div
-              className={`upload-dropzone border-2 border-dashed ${
-                coverFileName ? 'upload-dropzone-uploaded' : 'border-[#ddd]'
-              }`}
-              onClick={() => document.getElementById('cover-input')?.click()}
-            >
-              {coverFileName ? (
-                <div className="flex items-center justify-between w-full px-4">
-                  <span className="upload-dropzone-text">{coverFileName}</span>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      removeCover()
-                    }}
-                    className="upload-dropzone-remove"
-                  >
-                    <X size={20} />
-                  </button>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center">
-                  <ImageIcon className="upload-dropzone-icon" />
-                  <p className="upload-dropzone-text">Click to upload cover image</p>
-                  <p className="upload-dropzone-hint">Leave empty to auto-generate from PDF</p>
-                </div>
-              )}
-            </div>
-            <input
-              id="cover-input"
-              type="file"
-              accept="image/*"
-              onChange={onCoverChange}
-              className="hidden"
-            />
-          </div>
-
-          {/* Title Input */}
-          <div>
-            <label htmlFor="title" className="form-label">Title</label>
-            <input
-              id="title"
-              className="form-input"
-              placeholder="ex: Rich Dad Poor Dad"
-              type="text"
-              {...form.register('title')}
-            />
-            {form.formState.errors.title && (
-              <p className="text-red-500 text-sm mt-1">{form.formState.errors.title.message}</p>
-            )}
-          </div>
-
-          {/* Author Input */}
-          <div>
-            <label htmlFor="author" className="form-label">Author Name</label>
-            <input
-              id="author"
-              className="form-input"
-              placeholder="ex: Robert Kiyosaki"
-              type="text"
-              {...form.register('author')}
-            />
-            {form.formState.errors.author && (
-              <p className="text-red-500 text-sm mt-1">{form.formState.errors.author.message}</p>
-            )}
-          </div>
-
-          {/* Voice Selector */}
-          <div>
-            <label className="form-label">Choose Assistant Voice</label>
-            
-            {/* Male Voices */}
-            <div className="mb-4">
-              <p className="text-sm font-medium text-[#666] mb-3">Male Voices</p>
-              <div className="voice-selector-options">
-                {MALE_VOICES.map((voice) => (
-                  <label
-                    key={voice.id}
-                    className={`voice-selector-option ${
-                      form.watch('voice') === voice.id
-                        ? 'voice-selector-option-selected'
-                        : 'voice-selector-option-default'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      value={voice.id}
-                      {...form.register('voice')}
-                      className="w-4 h-4 cursor-pointer"
-                    />
-                    <div className="flex-1">
-                      <p className="font-semibold text-[#222]">{voice.name}</p>
-                      <p className="text-xs text-[#666]">{voice.description}</p>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            {/* Female Voices */}
-            <div>
-              <p className="text-sm font-medium text-[#666] mb-3">Female Voices</p>
-              <div className="voice-selector-options">
-                {FEMALE_VOICES.map((voice) => (
-                  <label
-                    key={voice.id}
-                    className={`voice-selector-option ${
-                      form.watch('voice') === voice.id
-                        ? 'voice-selector-option-selected'
-                        : 'voice-selector-option-default'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      value={voice.id}
-                      {...form.register('voice')}
-                      className="w-4 h-4 cursor-pointer"
-                    />
-                    <div className="flex-1">
-                      <p className="font-semibold text-[#222]">{voice.name}</p>
-                      <p className="text-xs text-[#666]">{voice.description}</p>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            </div>
-            
-            {form.formState.errors.voice && (
-              <p className="text-red-500 text-sm mt-1">{form.formState.errors.voice.message}</p>
-            )}
-          </div>
-
-          {/* Submit Button */}
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="form-btn disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Begin Synthesis
-          </button>
-        </form>
-      </div>
-    </>
-  )
-}
-
-export default UploadForm
+export default UploadForm;

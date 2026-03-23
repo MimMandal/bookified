@@ -1,23 +1,23 @@
-'use client'
 
-import React from 'react'
+'use client';
 
-interface LoadingOverlayProps {
-  isVisible: boolean
-  message?: string
-}
+import React from 'react';
+import { Loader2 } from 'lucide-react';
 
-const LoadingOverlay: React.FC<LoadingOverlayProps> = ({ isVisible, message = 'Processing...' }) => {
-  if (!isVisible) return null
+const LoadingOverlay = () => {
+    return (
+        <div className="loading-wrapper">
+            <div className="loading-shadow-wrapper bg-white shadow-soft-lg">
+                <div className="loading-shadow">
+                    <Loader2 className="loading-animation w-12 h-12 text-[#663820]" />
+                    <h2 className="loading-title">Synthesizing Your Book</h2>
+                    <p className="text-[#777] text-center max-w-xs">
+                        Please wait while we process your PDF and prepare your interactive literary experience.
+                    </p>
+                </div>
+            </div>
+        </div>
+    );
+};
 
-  return (
-    <div className="loading-wrapper">
-      <div className="flex flex-col items-center gap-4">
-        <div className="w-12 h-12 border-4 border-white border-t-transparent rounded-full animate-spin"></div>
-        <p className="text-white text-lg font-medium">{message}</p>
-      </div>
-    </div>
-  )
-}
-
-export default LoadingOverlay
+export default LoadingOverlay;
